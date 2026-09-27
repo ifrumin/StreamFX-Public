@@ -1,0 +1,175 @@
+# StreamFX 0.12.0b299 -> OBS Studio 29.1.1, Windows x64, portable layout.
+# Derived from the repo's own .github/workflows/main.yml (2023) with:
+#   - actions bumped to v4
+#   - explicit checkout of the release tag (fork default branch is a different commit)
+#   - NVIDIA MAXINE submodules skipped (their GitHub repos are gone -> 404)
+#   - CMAKE_POLICY_VERSION_MINIMUM=3.5 (nlohmann-json / jansson declare CMake < 3.5)
+#   - MSVC only, RelWithDebInfo only, no macOS/Ubuntu jobs
+#   - added: cmake --install + upload-artifact (original workflow never packaged)
+#
+# Output artifact unzips to:  obs-plugins/64bit/StreamFX.dll + data/obs-plugins/StreamFX/
+# which is exactly what drops into a portable OBS 29.1.1 folder.
+
+name: Build StreamFX (portable, OBS 29.1.1)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to build"
+        required: true
+        default: "0.12.0b299"
+      sdk:
+        description: "CMAKE_SYSTEM_VERSION (Windows SDK). Blank = let VS pick."
+        required: false
+        default: "10.0.20348.0"
+
+env:
+  CACHE_VERSION: "2026-09-27"
+
+jobs:
+  windows:
+    name: "Windows x64 (MSVC)"
+    runs-on: windows-2022
+    env:
+      CMAKE_GENERATOR: "Visual Studio 17 2022"
+      CMAKE_GENERATOR_PLATFORM: "x64"
+    steps:
+
+    - name: "Clone (no submodules)"
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.ref }}
+        submodules: false
+        fetch-depth: 0
+
+    - name: "Submodules (skip dead NVIDIA MAXINE repos)"
+      shell: bash
+      run: |
+        git submodule update --init --depth 1 \
+          cmake/clang \
+          cmake/version \
+          third-party/nlohmann-json \
+          third-party/msvc-redist-helper \
+          third-party/obs-studio
+        echo "--- submodule status ---"
+        git submodule status
+
+    - name: "Gather Information"
+      id: info
+      shell: bash
+      run: |
+        buildspec="${{ github.workspace }}/third-party/obs-studio/buildspec.json"
+        IFS=$'\n' d=($(node tools/buildspec.js "${buildspec}" "prebuilt" "windows-x64"))
+        echo "obs_deps_version=${d[0]}" >> "$GITHUB_ENV"
+        echo "obs_deps_hash=${d[1]}"    >> "$GITHUB_ENV"
+        echo "obs_deps_url=${d[2]}"     >> "$GITHUB_ENV"
+        IFS=$'\n' d=($(node tools/buildspec.js "${buildspec}" "qt6" "windows-x64"))
+        echo "qt_version=${d[0]}" >> "$GITHUB_ENV"
+        echo "qt_hash=${d[1]}"    >> "$GITHUB_ENV"
+        echo "qt_url=${d[2]}"     >> "$GITHUB_ENV"
+        echo "obs_version=29.1.1" >> "$GITHUB_ENV"
+        if [[ -n "${{ inputs.sdk }}" ]]; then
+          echo "SDK_ARG=-DCMAKE_SYSTEM_VERSION=${{ inputs.sdk }}" >> "$GITHUB_ENV"
+        else
+          echo "SDK_ARG=" >> "$GITHUB_ENV"
+        fi
+        echo "obs-deps: ${d[2]}"
+        cmake --version | head -1
+
+    - name: "Dependency: Qt (Cache)"
+      id: qt-cache
+      uses: actions/cache@v4
+      with:
+        path: "${{ github.workspace }}/build/qt"
+        key: "qt${{ env.qt_hash }}-${{ env.CACHE_VERSION }}"
+
+    - name: "Dependency: Qt"
+      if: ${{ steps.qt-cache.outputs.cache-hit != 'true' }}
+      shell: bash
+      run: |
+        curl --retry 5 --retry-delay 30 -jLo /tmp/qt.zip "${{ env.qt_url }}"
+        mkdir -p "${{ github.workspace }}/build/qt"
+        7z x -y -o"${{ github.workspace }}/build/qt" -- "/tmp/qt.zip"
+
+    - name: "Dependency: Prebuilt OBS Dependencies (Cache)"
+      id: obsdeps-cache
+      uses: actions/cache@v4
+      with:
+        path: "${{ github.workspace }}/build/obsdeps"
+        key: "obsdeps${{ env.obs_deps_hash }}-${{ env.CACHE_VERSION }}"
+
+    - name: "Dependency: Prebuilt OBS Dependencies"
+      if: ${{ steps.obsdeps-cache.outputs.cache-hit != 'true' }}
+      shell: bash
+      run: |
+        curl --retry 5 --retry-delay 30 -jLo /tmp/obsdeps.zip "${{ env.obs_deps_url }}"
+        mkdir -p "${{ github.workspace }}/build/obsdeps"
+        7z x -y -o"${{ github.workspace }}/build/obsdeps" -- "/tmp/obsdeps.zip"
+
+    - name: "Dependency: OBS Libraries (Cache)"
+      id: obs-cache
+      uses: actions/cache@v4
+      with:
+        path: "${{ github.workspace }}/build/obs/install"
+        key: "obs${{ env.obs_version }}-msvc-obsdeps${{ env.obs_deps_hash }}-qt${{ env.qt_hash }}-${{ env.CACHE_VERSION }}"
+
+    - name: "Dependency: OBS Libraries (libobs + obs-frontend-api)"
+      if: ${{ steps.obs-cache.outputs.cache-hit != 'true' }}
+      shell: bash
+      run: |
+        pushd "${{ github.workspace }}/third-party/obs-studio" > /dev/null
+        for f in ../../patches/obs-studio/*.patch; do
+          [ -e "$f" ] || continue
+          echo "Applying patch '${f}'..."
+          git apply "$f"
+        done
+        popd > /dev/null
+
+        cmake \
+          -S "${{ github.workspace }}/third-party/obs-studio" \
+          -B "${{ github.workspace }}/build/obs" \
+          ${{ env.SDK_ARG }} \
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+          -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/build/obs/install" \
+          -DCMAKE_PREFIX_PATH="${{ github.workspace }}/build/obsdeps;${{ github.workspace }}/build/qt" \
+          -DENABLE_PLUGINS=OFF \
+          -DENABLE_UI=OFF \
+          -DENABLE_SCRIPTING=OFF
+        cmake --build "${{ github.workspace }}/build/obs" --config RelWithDebInfo --target obs-frontend-api
+        cmake --install "${{ github.workspace }}/build/obs" --config RelWithDebInfo --component obs_libraries
+
+    - name: "Configure StreamFX"
+      shell: bash
+      run: |
+        cmake \
+          -S "${{ github.workspace }}" \
+          -B "${{ github.workspace }}/build/ci" \
+          ${{ env.SDK_ARG }} \
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+          -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+          -Dlibobs_DIR="${{ github.workspace }}/build/obs/install" \
+          -DQt6_DIR="${{ github.workspace }}/build/qt" \
+          -DFFmpeg_DIR="${{ github.workspace }}/build/obsdeps" \
+          -DCURL_DIR="${{ github.workspace }}/build/obsdeps"
+
+    - name: "Build StreamFX (RelWithDebInfo)"
+      shell: bash
+      run: |
+        cmake --build "${{ github.workspace }}/build/ci" --config RelWithDebInfo --target StreamFX
+
+    - name: "Install into portable layout"
+      shell: bash
+      run: |
+        cmake --install "${{ github.workspace }}/build/ci" --config RelWithDebInfo \
+          --prefix "${{ github.workspace }}/build/package"
+        echo "--- package tree ---"
+        find "${{ github.workspace }}/build/package" -maxdepth 3 | head -40
+        ls -la "${{ github.workspace }}/build/package/obs-plugins/64bit/" || true
+
+    - name: "Upload artifact"
+      uses: actions/upload-artifact@v4
+      with:
+        name: "StreamFX-${{ inputs.ref }}-OBS29.1.1-win64-portable"
+        path: "${{ github.workspace }}/build/package"
+        if-no-files-found: error
