@@ -130,6 +130,7 @@ jobs:
           -S "${{ github.workspace }}/third-party/obs-studio" \
           -B "${{ github.workspace }}/build/obs" \
           ${{ env.SDK_ARG }} \
+          -DOBS_VERSION_OVERRIDE=29.1.1 \
           -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
           -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/build/obs/install" \
           -DCMAKE_PREFIX_PATH="${{ github.workspace }}/build/obsdeps;${{ github.workspace }}/build/qt" \
