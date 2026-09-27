@@ -131,6 +131,8 @@ jobs:
           -B "${{ github.workspace }}/build/obs" \
           ${{ env.SDK_ARG }} \
           -DOBS_VERSION_OVERRIDE=29.1.1 \
+          -DZLIB_INCLUDE_DIR="${{ github.workspace }}/build/obsdeps/include" \
+          -DZLIB_LIBRARY="${{ github.workspace }}/build/obsdeps/lib/zlib.lib" \
           -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
           -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/build/obs/install" \
           -DCMAKE_PREFIX_PATH="${{ github.workspace }}/build/obsdeps;${{ github.workspace }}/build/qt" \
